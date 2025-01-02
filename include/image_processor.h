@@ -11,7 +11,7 @@ public:
     ~ImageProcessor();
 
 private:
-    static const int NUM_IMAGES = 5000;
+    static const int NUM_IMAGES = 1000;
     std::vector<unsigned char> all_images_data;
     std::vector<unsigned char> all_output_data;
     int single_image_size;
