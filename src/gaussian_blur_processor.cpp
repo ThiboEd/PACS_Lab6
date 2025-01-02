@@ -1,4 +1,7 @@
 #include "../include/gaussian_blur_processor.h"
+#include <math.h>
+
+#define DIM 3 
 
 GaussianBlurProcessor::GaussianBlurProcessor(bool boolean){
     gaussian_kernel = create_gaussian_matrix(1.0);
@@ -12,7 +15,41 @@ GaussianBlurProcessor::~GaussianBlurProcessor(){
     if (context) clReleaseContext (context);
 }
 
-GaussianBlurProcessor::initializeOpenCL(cl_device device){
+void GaussianBlurProcessor::check_error(cl_int err, const char *operation){
+        if (err != CL_SUCCESS){
+        fprintf(stderr , "Error during operation '%s',",operation);
+        exit(EXIT_FAILURE);
+    }
+}
+
+std::vector<float> GaussianBlurProcessor::create_gaussian_matrix(double sigma){
+    /*
+    Compute the convolution matrix for all values of sigma (1 by default)
+    and a mean of 0 with the desired filter size (here 3).
+    */
+    
+    double kernel[DIM][DIM];
+    std::vector<float> result;
+    double K = 1 / (2 * M_PI * pow(sigma, 2));
+    double sum = 0.0;
+
+    for (int i = 0; i < DIM; i++) {
+        for (int j = 0; j < DIM; j++) {
+            kernel[i][j] = K * exp(-((pow(i - (DIM / 2), 2) + pow(j - (DIM / 2), 2)) / (2 * sigma * sigma)));
+            sum += kernel[i][j];
+        }
+    }
+    // Normalize the kernel
+    for (int i = 0; i < DIM; i++) {
+        for (int j = 0; j < DIM; j++) {
+            kernel[i][j] /= sum;
+            result.push_back(static_cast<float>(kernel[i][j])); //Not sure we need static_cast here. 
+        }
+    }
+    return result;
+}
+
+void GaussianBlurProcessor::initializeOpenCL(cl_device_id device){
 
     cl_context context;
     cl_command_queue commands;
@@ -51,12 +88,18 @@ GaussianBlurProcessor::initializeOpenCL(cl_device device){
 
     kernel = clCreateKernel(program , "gaussian_blur" , &err);
     check_error(err , "Creating kernel");
+
+    this->context = context;
+    this->commands = commands;
+    this->program = program;
+    this->kernel = kernel;
 }
 
-GaussianBlurProcessor::processImage(const unsigned char* input_data , unsigned char* output_data,
+void GaussianBlurProcessor::processImage(const unsigned char* input_data , unsigned char* output_data,
                                     int width , int height){
 
     cl_mem input_buffer , kernel_buffer , dim_buffer , output_buffer;
+    cl_int err;
 
     int GPU_height = height / 2;
     int remainder = height % 2;
@@ -84,7 +127,7 @@ GaussianBlurProcessor::processImage(const unsigned char* input_data , unsigned c
     kernel_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, gaussian_buffer_size, gaussian_kernel.data(),&err);
     check_error(err, "Creating kernel buffer");
 
-    dim_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, dim_buffer_size,dim.data(),err);
+    dim_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, dim_buffer_size,dim.data(), &err);
     check_error(err, "Creating dim buffer");
 
     output_buffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, buffer_size,NULL , &err);
@@ -92,7 +135,7 @@ GaussianBlurProcessor::processImage(const unsigned char* input_data , unsigned c
 
     err = clEnqueueWriteBuffer(commands,
                                input_buffer,
-                               Cl_TRUE,
+                               CL_TRUE,
                                0,
                                buffer_size,
                                input_data + (start_height * width),
@@ -130,7 +173,3 @@ GaussianBlurProcessor::processImage(const unsigned char* input_data , unsigned c
     clReleaseMemObject(dim_buffer);
 }
 
-
-int main(){
-
-}

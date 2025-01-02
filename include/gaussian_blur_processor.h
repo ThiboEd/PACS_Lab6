@@ -1,4 +1,5 @@
 #pragma once
+#define cimg_use_jpeg
 
 #include <CL/cl.h>
 #include <vector>

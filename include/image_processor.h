@@ -8,6 +8,7 @@ public:
     ImageProcessor();
     void loadAndReplicateImage(const char* filename);
     void processImagesWithOpenCL();
+    ~ImageProcessor();
 
 private:
     static const int NUM_IMAGES = 5000;
