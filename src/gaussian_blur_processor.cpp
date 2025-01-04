@@ -206,7 +206,7 @@ ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input
     size_t local_size[2] = {16, 16};
 
     err = clEnqueueNDRangeKernel(commands, kernel, 2, NULL, global_size, local_size,
-                                1, &write_event, &kernel_event);
+                                0, NULL, &kernel_event);
     check_error(err, "Enqueuing kernel");
 
     err = clEnqueueReadBuffer(commands, output_buffer, CL_TRUE, 0, buffer_size,
