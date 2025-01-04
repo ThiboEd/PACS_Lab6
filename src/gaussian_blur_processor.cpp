@@ -143,7 +143,7 @@ double GaussianBlurProcessor::calculateGPUOccupancy(size_t global_work_items, si
 ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input_data, 
                                                     unsigned char* output_data,
                                                     int width, int height) {
-    ProcessingMetrics metrics = {};  
+    ProcessingMetrics metrics = {};  // Initialisation à zéro de toutes les métriques
     cl_event write_event, kernel_event, read_event;
     cl_int err;
 
@@ -158,10 +158,10 @@ ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input
         start_height = GPU_height;
         current_height = GPU_height + remainder;
     }
-    
+
     std::vector<int> dim = {current_height, width};
 
-
+    // Calcul précis de la mémoire utilisée
     size_t buffer_size = current_height * width * sizeof(unsigned char);
     size_t gaussian_buffer_size = gaussian_kernel.size() * sizeof(float);
     size_t dim_buffer_size = dim.size() * sizeof(int);
@@ -170,7 +170,7 @@ ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input
                          gaussian_buffer_size + // kernel gaussien
                          dim_buffer_size;  // buffer des dimensions
 
-
+    // Création des buffers avec gestion d'erreurs
     cl_mem input_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY, buffer_size, NULL, &err);
     check_error(err, "Creating input buffer");
     
@@ -185,22 +185,18 @@ ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input
     cl_mem output_buffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, buffer_size, NULL, &err);
     check_error(err, "Creating output buffer");
 
+    // Mesure du temps avec des événements
     auto cpu_start = std::chrono::high_resolution_clock::now();
 
-    err = clEnqueueWriteBuffer(commands, input_buffer, CL_FALSE, 0, buffer_size,
+    err = clEnqueueWriteBuffer(commands, input_buffer, CL_TRUE, 0, buffer_size,
                               input_data + (start_height * width), 0, NULL, &write_event);
-    check_error(err, "Enqueuing write buffer");
+    check_error(err, "Writing to input buffer");
 
     err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &input_buffer);
     err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &output_buffer);
     err |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &kernel_buffer);
     err |= clSetKernelArg(kernel, 3, sizeof(cl_mem), &dim_buffer);
     check_error(err, "Setting kernel arguments");
-
-    size_t max_work_group_size;
-    err = clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_WORK_GROUP_SIZE, 
-                                  sizeof(max_work_group_size), &max_work_group_size, NULL);
-    check_error(err, "Getting work group info");
 
     size_t global_size[2] = {static_cast<size_t>(width), static_cast<size_t>(current_height)};
     size_t local_size[2] = {16, 16};
@@ -211,23 +207,24 @@ ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input
 
     err = clEnqueueReadBuffer(commands, output_buffer, CL_TRUE, 0, buffer_size,
                              output_data + (start_height * width), 
-                             1, &kernel_event, &read_event);
+                             0, NULL, &read_event);
     check_error(err, "Reading output buffer");
 
     clFinish(commands);
     auto cpu_end = std::chrono::high_resolution_clock::now();
 
+    // Calcul des temps d'exécution
     metrics.memory_transfer_time = getEventExecutionTime(write_event) + getEventExecutionTime(read_event);
     metrics.kernel_execution_time = getEventExecutionTime(kernel_event);
-    
     metrics.total_processing_time = std::chrono::duration<double>(cpu_end - cpu_start).count();
+    metrics.overhead_time = metrics.total_processing_time - 
+                          (metrics.memory_transfer_time + metrics.kernel_execution_time);
     
+    // Calcul de l'occupation GPU
     metrics.gpu_occupancy = calculateGPUOccupancy(global_size[0] * global_size[1], 
                                                 local_size[0] * local_size[1]);
 
-    metrics.overhead_time = metrics.total_processing_time - 
-                          (metrics.memory_transfer_time + metrics.kernel_execution_time);
-
+    // Nettoyage
     clReleaseEvent(write_event);
     clReleaseEvent(kernel_event);
     clReleaseEvent(read_event);
@@ -238,6 +235,7 @@ ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input
 
     return metrics;
 }
+
 
 
 
