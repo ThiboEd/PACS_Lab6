@@ -22,6 +22,53 @@ void GaussianBlurProcessor::check_error(cl_int err, const char *operation){
     }
 }
 
+void GaussianBlurProcessor::initializeOpenCL(cl_device_id device) {
+    cl_int err;
+    this->device = device;  // Stocke le device pour une utilisation ultérieure
+
+    // Création du contexte
+    context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
+    check_error(err, "Creating context");
+
+    // Création de la command queue avec profiling activé
+    commands = clCreateCommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err);
+    check_error(err, "Creating command queue");
+
+    // Lecture du fichier source du kernel
+    FILE *fileHandler = fopen("gaussian_kernel.cl", "r");
+    if (!fileHandler) {
+        fprintf(stderr, "Failed to load kernel file\n");
+        exit(1);
+    }
+    
+    fseek(fileHandler, 0, SEEK_END);
+    size_t fileSize = ftell(fileHandler);
+    rewind(fileHandler);
+
+    char* sourceCode = (char*)malloc(fileSize + 1);
+    sourceCode[fileSize] = '\0';
+    fread(sourceCode, sizeof(char), fileSize, fileHandler);
+    fclose(fileHandler);
+
+    // Création et compilation du programme
+    program = clCreateProgramWithSource(context, 1, (const char**)&sourceCode, &fileSize, &err);
+    check_error(err, "Creating program");
+    free(sourceCode);
+
+    err = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        size_t len;
+        char buffer[2048];
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, sizeof(buffer), buffer, &len);
+        printf("Build error: %s\n", buffer);
+        exit(-1);
+    }
+
+    // Création du kernel
+    kernel = clCreateKernel(program, "gaussian_blur", &err);
+    check_error(err, "Creating kernel");
+}
+
 std::vector<float> GaussianBlurProcessor::create_gaussian_matrix(double sigma){
     /*
     Compute the convolution matrix for all values of sigma (1 by default)
@@ -49,127 +96,116 @@ std::vector<float> GaussianBlurProcessor::create_gaussian_matrix(double sigma){
     return result;
 }
 
-void GaussianBlurProcessor::initializeOpenCL(cl_device_id device){
+void GaussianBlurProcessor::printDeviceInfo() {
+    cl_ulong global_mem_size;
+    cl_ulong local_mem_size;
+    cl_uint compute_units;
+    char device_name[128];
+    
+    clGetDeviceInfo(device, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(global_mem_size), &global_mem_size, NULL);
+    clGetDeviceInfo(device, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(local_mem_size), &local_mem_size, NULL);
+    clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(compute_units), &compute_units, NULL);
+    clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(device_name), device_name, NULL);
 
-    cl_context context;
-    cl_command_queue commands;
-    cl_program program;
-    cl_kernel kernel;
-    cl_int err;
-
-    context = clCreateContext(NULL , 1 , &device , NULL, NULL , &err);
-    check_error(err, "Creating context");
-
-    commands = clCreateCommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err);
-    check_error(err, "Creating command queue");
-
-    FILE *fileHandler = fopen("gaussian_kernel.cl","r");
-    fseek(fileHandler,0,SEEK_END);
-    size_t fileSize = ftell(fileHandler);
-    rewind(fileHandler);
-
-    char* sourceCode =(char*)malloc(fileSize + 1);
-    sourceCode[fileSize] = '\0';
-    fread(sourceCode, sizeof(char), fileSize, fileHandler);
-    fclose(fileHandler);
-
-    program = clCreateProgramWithSource(context, 1 , (const char**)&sourceCode , &fileSize , &err);
-    check_error(err , "Creating program");
-    free(sourceCode);
-
-    err = clBuildProgram(program,0,NULL,NULL,NULL,NULL);
-    if (err !=CL_SUCCESS){
-        size_t len;
-        char buffer[2048];
-        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, sizeof(buffer),buffer,&len);
-        printf("%s\n",buffer);
-        exit(-1);
-    }
-
-    kernel = clCreateKernel(program , "gaussian_blur" , &err);
-    check_error(err , "Creating kernel");
-
-    this->context = context;
-    this->commands = commands;
-    this->program = program;
-    this->kernel = kernel;
+    std::cout << "Device: " << device_name << std::endl;
+    std::cout << "Global Memory: " << (global_mem_size / (1024*1024)) << " MB" << std::endl;
+    std::cout << "Local Memory: " << (local_mem_size / 1024) << " KB" << std::endl;
+    std::cout << "Compute Units: " << compute_units << std::endl;
 }
 
-void GaussianBlurProcessor::processImage(const unsigned char* input_data , unsigned char* output_data,
-                                    int width , int height){
+double GaussianBlurProcessor::getEventExecutionTime(cl_event event) {
+    cl_ulong time_start, time_end;
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+    return (time_end - time_start) / 1.0e9; // Conversion en secondes
+}
 
-    cl_mem input_buffer , kernel_buffer , dim_buffer , output_buffer;
+double GaussianBlurProcessor::calculateGPUOccupancy(size_t global_work_items, size_t local_work_items) {
+    cl_uint compute_units;
+    size_t max_work_group_size;
+    
+    clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(compute_units), &compute_units, NULL);
+    clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(max_work_group_size), &max_work_group_size, NULL);
+    
+    double theoretical_max_workgroups = compute_units * (max_work_group_size / local_work_items);
+    double actual_workgroups = global_work_items / local_work_items;
+    
+    return (actual_workgroups / theoretical_max_workgroups) * 100.0;
+}
+
+ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input_data, 
+                                                    unsigned char* output_data,
+                                                    int width, int height) {
+    ProcessingMetrics metrics;
+    cl_event write_event, kernel_event, read_event;
     cl_int err;
 
     int GPU_height = height / 2;
     int remainder = height % 2;
 
-    int start_height , current_height;
-
-    if (first_gpu){
+    int start_height, current_height;
+    if (first_gpu) {
         start_height = 0;
         current_height = GPU_height;
-    }
-    else{
+    } else {
         start_height = GPU_height;
         current_height = GPU_height + remainder;
     }
 
-    std::vector<int> dim = {current_height , width};
+    std::vector<int> dim = {current_height, width};
 
     size_t buffer_size = current_height * width * sizeof(unsigned char);
     size_t gaussian_buffer_size = gaussian_kernel.size() * sizeof(float);
     size_t dim_buffer_size = dim.size() * sizeof(int);
 
-    input_buffer = clCreateBuffer(context , CL_MEM_READ_ONLY, buffer_size, NULL, &err);
-    check_error(err, "Creating input buffer");
+    // Création des buffers
+    cl_mem input_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY, buffer_size, NULL, &err);
+    cl_mem kernel_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
+                                        gaussian_buffer_size, gaussian_kernel.data(), &err);
+    cl_mem dim_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
+                                     dim_buffer_size, dim.data(), &err);
+    cl_mem output_buffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, buffer_size, NULL, &err);
 
-    kernel_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, gaussian_buffer_size, gaussian_kernel.data(),&err);
-    check_error(err, "Creating kernel buffer");
+    // Mesure du temps de transfert mémoire (write)
+    err = clEnqueueWriteBuffer(commands, input_buffer, CL_TRUE, 0, buffer_size,
+                              input_data + (start_height * width), 0, NULL, &write_event);
 
-    dim_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, dim_buffer_size,dim.data(), &err);
-    check_error(err, "Creating dim buffer");
-
-    output_buffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, buffer_size,NULL , &err);
-    check_error(err, "Creating output buffer");
-
-    err = clEnqueueWriteBuffer(commands,
-                               input_buffer,
-                               CL_TRUE,
-                               0,
-                               buffer_size,
-                               input_data + (start_height * width),
-                               0, NULL , NULL);
-    check_error(err, "Writing to input buffer");
-
+    // Configuration et exécution du kernel
     err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &input_buffer);
-    err |= clSetKernelArg(kernel, 1 , sizeof(cl_mem), &output_buffer);
+    err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &output_buffer);
     err |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &kernel_buffer);
-    err |= clSetKernelArg(kernel , 3, sizeof(cl_mem), &dim_buffer);
-    check_error(err , "Setting kernel arguments");
+    err |= clSetKernelArg(kernel, 3, sizeof(cl_mem), &dim_buffer);
 
-    size_t global_size[2] = {static_cast<size_t>(width) , static_cast<size_t>(current_height)};
-    err= clEnqueueNDRangeKernel(commands,
-                                kernel,
-                                2,
-                                NULL,
-                                global_size,
-                                NULL,
-                                0, NULL, NULL);
-    check_error(err,"Executing kernel");
+    size_t global_size[2] = {static_cast<size_t>(width), static_cast<size_t>(current_height)};
+    size_t local_size[2] = {16, 16}; // Taille de work-group optimale à ajuster
 
-    err = clEnqueueReadBuffer(commands,
-                              output_buffer,
-                              CL_TRUE,
-                              0,
-                              buffer_size,
-                              output_data + (start_height * width),
-                              0, NULL, NULL);
-    check_error(err , "Reading output buffer");
+    err = clEnqueueNDRangeKernel(commands, kernel, 2, NULL, global_size, local_size,
+                                0, NULL, &kernel_event);
 
+    // Mesure du temps de transfert mémoire (read)
+    err = clEnqueueReadBuffer(commands, output_buffer, CL_TRUE, 0, buffer_size,
+                             output_data + (start_height * width), 0, NULL, &read_event);
+
+    clFinish(commands);
+
+    // Calcul des métriques
+    metrics.memory_transfer_time = getEventExecutionTime(write_event) + getEventExecutionTime(read_event);
+    metrics.kernel_execution_time = getEventExecutionTime(kernel_event);
+    metrics.total_processing_time = metrics.memory_transfer_time + metrics.kernel_execution_time;
+    metrics.memory_used = buffer_size + gaussian_buffer_size + dim_buffer_size;
+    metrics.gpu_occupancy = calculateGPUOccupancy(global_size[0] * global_size[1], 
+                                                local_size[0] * local_size[1]);
+
+    // Nettoyage
+    clReleaseEvent(write_event);
+    clReleaseEvent(kernel_event);
+    clReleaseEvent(read_event);
     clReleaseMemObject(input_buffer);
     clReleaseMemObject(output_buffer);
     clReleaseMemObject(kernel_buffer);
     clReleaseMemObject(dim_buffer);
+
+    return metrics;
 }
+
 

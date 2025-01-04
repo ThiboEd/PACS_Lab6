@@ -1,12 +1,13 @@
 #include "../include/image_processor.h"
 
-int main(){
-
+int main() {
     ImageProcessor img_process;
 
     img_process.loadAndReplicateImage("image/image.jpg");
 
-    img_process.processImagesWithOpenCL();
+    GlobalMetrics metrics = img_process.processImagesWithOpenCL();
+    img_process.printMetrics(metrics);
 
     return EXIT_SUCCESS;
 }
+
