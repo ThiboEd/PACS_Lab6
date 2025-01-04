@@ -36,7 +36,7 @@ GlobalMetrics ImageProcessor::processImagesWithOpenCL() {
     clGetPlatformIDs(1, &platform, NULL);
     clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 2, devices, &num_devices);
 
-    // Initialisation des processeurs
+    
     for (int i = 0; i < 2; i++) {
         processors[i].initializeOpenCL(devices[i]);
         processors[i].printDeviceInfo();

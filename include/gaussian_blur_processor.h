@@ -7,13 +7,14 @@
 #include <iostream>
 
 struct ProcessingMetrics {
-    double kernel_execution_time;
-    double memory_transfer_time;
-    double total_processing_time;
-    size_t memory_used;
-    double gpu_occupancy;
+    double memory_transfer_time;    
+    double kernel_execution_time;   
+    double total_processing_time;  
+    double overhead_time;          
+    size_t memory_used;            
+    double gpu_occupancy;          
+    double transfer_bandwidth;      
 };
-
 
 class GaussianBlurProcessor {
     public:

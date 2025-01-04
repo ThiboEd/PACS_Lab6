@@ -1,5 +1,6 @@
 #include "../include/gaussian_blur_processor.h"
 #include <math.h>
+#include <chrono>
 
 #define DIM 3 
 
@@ -24,17 +25,17 @@ void GaussianBlurProcessor::check_error(cl_int err, const char *operation){
 
 void GaussianBlurProcessor::initializeOpenCL(cl_device_id device) {
     cl_int err;
-    this->device = device;  // Stocke le device pour une utilisation ultérieure
+    this->device = device;  
 
-    // Création du contexte
+
     context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
     check_error(err, "Creating context");
 
-    // Création de la command queue avec profiling activé
+
     commands = clCreateCommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err);
     check_error(err, "Creating command queue");
 
-    // Lecture du fichier source du kernel
+
     FILE *fileHandler = fopen("gaussian_kernel.cl", "r");
     if (!fileHandler) {
         fprintf(stderr, "Failed to load kernel file\n");
@@ -50,7 +51,7 @@ void GaussianBlurProcessor::initializeOpenCL(cl_device_id device) {
     fread(sourceCode, sizeof(char), fileSize, fileHandler);
     fclose(fileHandler);
 
-    // Création et compilation du programme
+
     program = clCreateProgramWithSource(context, 1, (const char**)&sourceCode, &fileSize, &err);
     check_error(err, "Creating program");
     free(sourceCode);
@@ -64,7 +65,7 @@ void GaussianBlurProcessor::initializeOpenCL(cl_device_id device) {
         exit(-1);
     }
 
-    // Création du kernel
+
     kernel = clCreateKernel(program, "gaussian_blur", &err);
     check_error(err, "Creating kernel");
 }
@@ -117,26 +118,32 @@ double GaussianBlurProcessor::getEventExecutionTime(cl_event event) {
     cl_ulong time_start, time_end;
     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
     clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
-    return (time_end - time_start) / 1.0e9; // Conversion en secondes
+    return (time_end - time_start) / 1.0e9;
 }
 
 double GaussianBlurProcessor::calculateGPUOccupancy(size_t global_work_items, size_t local_work_items) {
     cl_uint compute_units;
     size_t max_work_group_size;
+    cl_uint max_work_items_per_dim[3];
     
     clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(compute_units), &compute_units, NULL);
     clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(max_work_group_size), &max_work_group_size, NULL);
+    clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof(max_work_items_per_dim), max_work_items_per_dim, NULL);
     
-    double theoretical_max_workgroups = compute_units * (max_work_group_size / local_work_items);
-    double actual_workgroups = global_work_items / local_work_items;
-    
-    return (actual_workgroups / theoretical_max_workgroups) * 100.0;
+
+    size_t max_concurrent_workgroups = compute_units;
+
+    size_t total_workgroups = (global_work_items + local_work_items - 1) / local_work_items;
+
+    double occupancy = (static_cast<double>(total_workgroups) / max_concurrent_workgroups);
+    return std::min(occupancy * 100.0, 100.0);
 }
+
 
 ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input_data, 
                                                     unsigned char* output_data,
                                                     int width, int height) {
-    ProcessingMetrics metrics;
+    ProcessingMetrics metrics = {};  
     cl_event write_event, kernel_event, read_event;
     cl_int err;
 
@@ -151,52 +158,76 @@ ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input
         start_height = GPU_height;
         current_height = GPU_height + remainder;
     }
-
+    
     std::vector<int> dim = {current_height, width};
+
 
     size_t buffer_size = current_height * width * sizeof(unsigned char);
     size_t gaussian_buffer_size = gaussian_kernel.size() * sizeof(float);
     size_t dim_buffer_size = dim.size() * sizeof(int);
+    
+    metrics.memory_used = buffer_size * 2 + // input et output buffers
+                         gaussian_buffer_size + // kernel gaussien
+                         dim_buffer_size;  // buffer des dimensions
 
-    // Création des buffers
+
     cl_mem input_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY, buffer_size, NULL, &err);
+    check_error(err, "Creating input buffer");
+    
     cl_mem kernel_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
                                         gaussian_buffer_size, gaussian_kernel.data(), &err);
+    check_error(err, "Creating kernel buffer");
+    
     cl_mem dim_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
                                      dim_buffer_size, dim.data(), &err);
+    check_error(err, "Creating dim buffer");
+    
     cl_mem output_buffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, buffer_size, NULL, &err);
+    check_error(err, "Creating output buffer");
 
-    // Mesure du temps de transfert mémoire (write)
-    err = clEnqueueWriteBuffer(commands, input_buffer, CL_TRUE, 0, buffer_size,
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+
+    err = clEnqueueWriteBuffer(commands, input_buffer, CL_FALSE, 0, buffer_size,
                               input_data + (start_height * width), 0, NULL, &write_event);
+    check_error(err, "Enqueuing write buffer");
 
-    // Configuration et exécution du kernel
     err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &input_buffer);
     err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &output_buffer);
     err |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &kernel_buffer);
     err |= clSetKernelArg(kernel, 3, sizeof(cl_mem), &dim_buffer);
+    check_error(err, "Setting kernel arguments");
+
+    size_t max_work_group_size;
+    err = clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_WORK_GROUP_SIZE, 
+                                  sizeof(max_work_group_size), &max_work_group_size, NULL);
+    check_error(err, "Getting work group info");
 
     size_t global_size[2] = {static_cast<size_t>(width), static_cast<size_t>(current_height)};
-    size_t local_size[2] = {16, 16}; // Taille de work-group optimale à ajuster
+    size_t local_size[2] = {16, 16};
 
     err = clEnqueueNDRangeKernel(commands, kernel, 2, NULL, global_size, local_size,
-                                0, NULL, &kernel_event);
+                                1, &write_event, &kernel_event);
+    check_error(err, "Enqueuing kernel");
 
-    // Mesure du temps de transfert mémoire (read)
     err = clEnqueueReadBuffer(commands, output_buffer, CL_TRUE, 0, buffer_size,
-                             output_data + (start_height * width), 0, NULL, &read_event);
+                             output_data + (start_height * width), 
+                             1, &kernel_event, &read_event);
+    check_error(err, "Reading output buffer");
 
     clFinish(commands);
+    auto cpu_end = std::chrono::high_resolution_clock::now();
 
-    // Calcul des métriques
     metrics.memory_transfer_time = getEventExecutionTime(write_event) + getEventExecutionTime(read_event);
     metrics.kernel_execution_time = getEventExecutionTime(kernel_event);
-    metrics.total_processing_time = metrics.memory_transfer_time + metrics.kernel_execution_time;
-    metrics.memory_used = buffer_size + gaussian_buffer_size + dim_buffer_size;
+    
+    metrics.total_processing_time = std::chrono::duration<double>(cpu_end - cpu_start).count();
+    
     metrics.gpu_occupancy = calculateGPUOccupancy(global_size[0] * global_size[1], 
                                                 local_size[0] * local_size[1]);
 
-    // Nettoyage
+    metrics.overhead_time = metrics.total_processing_time - 
+                          (metrics.memory_transfer_time + metrics.kernel_execution_time);
+
     clReleaseEvent(write_event);
     clReleaseEvent(kernel_event);
     clReleaseEvent(read_event);
@@ -207,5 +238,6 @@ ProcessingMetrics GaussianBlurProcessor::processImage(const unsigned char* input
 
     return metrics;
 }
+
 
 
